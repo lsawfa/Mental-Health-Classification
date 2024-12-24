@@ -23,7 +23,6 @@ import torch.nn.functional as F
 from transformers import BertModel, BertTokenizer, AdamW, get_linear_schedule_with_warmup
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-emotion_list = ['anger', 'brain dysfunction (forget)', 'emptiness', 'hopelessness', 'loneliness', 'sadness', 'suicide intent', 'worthlessness']
 
 class PreparedDataset():
     def __init__(self, texts, categories, tokenizer, max_len):
@@ -88,7 +87,6 @@ def search_index(type_list, class_names):
 def create_data_loader(dataset, tokenizer, class_names, max_len, batch_size):
 
     texts, categories = [], []
- 
     for item in dataset:
         item_classifier = [str(item['label_id'])]
         index = search_index(item_classifier, class_names)
@@ -144,8 +142,8 @@ def train_epoch(model, data_loader, loss_fn, optimizer, device, scheduler, n_exa
     pred_list = [class_names[c] for c in pred_list]
     true_list = [class_names[c] for c in true_list]
     
-    pred_list = convert_labels(pred_list)
-    true_list = convert_labels(true_list)
+    pred_list = convert_labels(args, pred_list)
+    true_list = convert_labels(args, true_list)
     
     #print('pred_list: ', pred_list)
     #print('true_list: ', true_list)
@@ -171,13 +169,13 @@ def train_epoch(model, data_loader, loss_fn, optimizer, device, scheduler, n_exa
         
     #return correct_predictions.double() / n_examples, np.mean(losses)
 
-def convert_labels(labels):
+def convert_labels(args, labels):
     
     labels2 = []
     for idx, label in enumerate(labels):
         
         temp = []
-        num = len(emotion_list) - len(label)
+        num = len(args.emotion_list) - len(label)
         if (num == 0): 
             temp = [int(x) for x in label]
         else:
@@ -217,8 +215,8 @@ def eval_model(model, data_loader, loss_fn, device, n_examples, class_names):
     #print('pred_list: ', pred_list)
     #print('true_list: ', true_list)
     
-    pred_list = convert_labels(pred_list)
-    true_list = convert_labels(true_list)
+    pred_list = convert_labels(args, pred_list)
+    true_list = convert_labels(args, true_list)
     
     f1_mi = f1_score(y_true=true_list, y_pred=pred_list, average='micro')
     re_mi = recall_score(y_true=true_list, y_pred=pred_list, average='micro')
@@ -365,8 +363,8 @@ def test_dataset(test_set, train_set, val_set, class_names = [],
     pred_list = [class_names[c] for c in pred_list]
     true_list = [class_names[c] for c in true_list]
     
-    pred_list = convert_labels(pred_list)
-    true_list = convert_labels(true_list)
+    pred_list = convert_labels(args, pred_list)
+    true_list = convert_labels(args, true_list)
     
     f1_mi = f1_score(y_true=true_list, y_pred=pred_list, average='micro')
     re_mi = recall_score(y_true=true_list, y_pred=pred_list, average='micro')
@@ -453,7 +451,6 @@ def predict_dataset(dataset, class_names, classifier_type = 'category',
 
 
 def classifier_by_text(dataset):
-
     type_dict = {}
     for item in dataset:
         temp_type = str(item['label_id'])
@@ -463,29 +460,106 @@ def classifier_by_text(dataset):
     type_dict = sorted(type_dict.items(), key = lambda x: x[1], reverse = True)
     return type_dict
 
+def dataset_emotion(args):
+    if args.dataset_type=='dataset1':
+        args.emotion_list = ['anger', 'brain dysfunction (forget)', 'emptiness', 'hopelessness', 'loneliness', 'sadness', 'suicide intent', 'worthlessness'] 
+    elif args.dataset_type=='dataset2':
+        args.emotion_list = ['Figurative Mentions', 'Non-Health Mentions', 'Health mentions']
+        args.label_list = [0,1,2]
+    elif args.dataset_type=='dataset3':
+        args.emotion_list = [0, 1]
+        args.label_list = args.emotion_list
+
+def load_file(path):
+    if path.endswith('.json') or path.endswith('.jsonl'):
+        return read_list_from_jsonl_file(path)
+    elif path.endswith('.csv'):
+        return read_list_from_csv_file(path)
+    else:
+        raise ValueError(f"Unsupported file format: {path}")
+
+def convert_to_multilabel_indicator(args, labels):
+        num_classes = len(args.label_list)
+        labels = [label for label in labels if label.strip().isdigit() and args.dataset_type == 'dataset3']
+        labels = [int(label) for label in labels]
+        multi_label = ''
+        for label in labels:
+            encoding = [0] * num_classes 
+            encoding[label] = 1         
+            multi_label += ''.join(map(str, encoding))
+        
+        return multi_label
+
+def change_format(args, dataset):
+    if args.dataset_type=='dataset2':
+        dataset = dataset[1:]
+        new_format_dataset = []
+        for item in dataset:
+            data = {
+                'text' : item[0],
+                'label_id': item[1]
+            }
+            new_format_dataset.append(data)
+        dataset=new_format_dataset
+        for entry in dataset:
+            entry['label_id'] = convert_to_multilabel_indicator(args, entry['label_id'])
+    elif args.dataset_type=='dataset3':
+        dataset = dataset[1:]
+        new_format_dataset = []
+        for item in dataset:
+            data = {
+                'text' : item[3],
+                'label_id': item[5]
+            }
+            new_format_dataset.append(data)
+        dataset=new_format_dataset
+        for entry in dataset:
+            entry['label_id'] = convert_to_multilabel_indicator(args, entry['label_id'])
+    return dataset
+
 def main(args):
     if (args.mode == 'train'):
-        train_set = read_list_from_jsonl_file(args.train_path)
-        val_set = read_list_from_jsonl_file(args.val_path)
-        test_set = read_list_from_jsonl_file(args.test_path)
+        dataset_emotion(args)
+        train_set = load_file(args.train_path)
+        val_set = load_file(args.val_path) if args.val_path else []
+        test_set = load_file(args.test_path) if args.test_path else []
     
         dataset = train_set + val_set + test_set # capture all labels
+        dataset = change_format(args, dataset)
+        train_set = change_format(args, train_set)
+        test_set = change_format(args, test_set)
+        val_set = change_format(args, val_set)
+
+        if args.dataset_type=='dataset2':
+            train_set, test_set = train_test_split(dataset, test_size=0.3, random_state=42, shuffle=True) if not test_set and not val_set else (train_set, test_set)
+            val_set, test_set = train_test_split(test_set, test_size=0.5, random_state=42, shuffle=True) if not test_set and not val_set else (val_set, test_set)
+        elif args.dataset_type=='dataset3':
+            val_set, test_set = train_test_split(dataset, test_size=0.5, random_state=42, shuffle=True) if not val_set else (train_set, test_set)
 
         class_names = sorted(list(set([item[0] for item in classifier_by_text(dataset)])), key = lambda x: x)
         class_names = [c.strip() for c in class_names if c.strip() != '']
         #print('class_names: ', class_names)
-    
+        
         train_model(train_set, val_set, test_set, class_names, pretrained_model = args.model_name,
                      saved_model_file = 'best_bert_model.pt',
                      saved_history_file = 'best_bert_model.json', epochs = args.epochs)
     
     elif (args.mode == 'test'):
-        
-        train_set = read_list_from_jsonl_file(args.train_path)
-        val_set = read_list_from_jsonl_file(args.val_path)
-        test_set = read_list_from_jsonl_file(args.test_path)
-    
+        dataset_emotion(args)
+        train_set = load_file(args.train_path)
+        val_set = load_file(args.val_path) if args.val_path else []
+        test_set = load_file(args.test_path) if args.test_path else []
         dataset = train_set + val_set + test_set # capture all labels
+        dataset = change_format(args, dataset)
+        train_set = change_format(args, train_set)
+        test_set = change_format(args, test_set)
+        val_set = change_format(args, val_set)
+
+        if args.dataset_type=='dataset2':
+            train_set, test_set = train_test_split(dataset, test_size=0.3, random_state=42, shuffle=True) if not test_set and not val_set else (train_set, test_set)
+            val_set, test_set = train_test_split(test_set, test_size=0.5, random_state=42, shuffle=True) if not test_set and not val_set else (val_set, test_set)
+        elif args.dataset_type=='dataset3':
+            val_set, test_set = train_test_split(dataset, test_size=0.5, random_state=42, shuffle=True) if not val_set else (train_set, test_set)
 
         class_names = sorted(list(set([item[0] for item in classifier_by_text(dataset)])), key = lambda x: x)
         class_names = [c.strip() for c in class_names if c.strip() != '']
@@ -500,14 +574,17 @@ if __name__ == "__main__":
     parser.add_argument('--mode', type=str, default='train') # or test
     parser.add_argument('--model_name', type=str, default='bert-base-cased') # or test
     parser.add_argument('--train_path', type=str, default='dataset/train.json') 
-    parser.add_argument('--test_path', type=str, default='dataset/test.json')
-    parser.add_argument('--val_path', type=str, default='dataset/val.json')
+    parser.add_argument('--test_path', type=str, default=None)
+    parser.add_argument('--val_path', type=str, default=None)
     parser.add_argument('--epochs', type=int, default=40)
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--test_batch_size', type=int, default=16)
     parser.add_argument('--max_length', type=int, default=256)
     parser.add_argument('--model_path', type=str, default='bart-base\checkpoint-452')
     parser.add_argument('--test_file', type=str, default='dataset/test.json')
+    parser.add_argument('--dataset_type', type=str, default='dataset1')
+    parser.add_argument('--emotion_list', default=None)
+    parser.add_argument('--label_list', default=None)
   
     args = parser.parse_args()
    
