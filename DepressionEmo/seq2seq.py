@@ -16,14 +16,13 @@ from file_io import *
 from huggingface_hub import HfFolder
 from nltk.tokenize import sent_tokenize
 from sklearn.metrics import f1_score, recall_score, precision_score
+from sklearn.model_selection import train_test_split
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, DataCollatorForSeq2Seq
 from transformers import Seq2SeqTrainer, Seq2SeqTrainingArguments
 
 # nltk.download("punkt")
 device = torch.device('cuda:0') if torch.cuda.is_available() else torch.device('cpu')
 print('CUDA: ', torch.cuda.is_available())
-
-emotion_list = ['anger', 'brain dysfunction (forget)', 'emptiness', 'hopelessness', 'loneliness', 'sadness', 'suicide intent', 'worthlessness']
 
 def preprocess_function(sample, padding="max_length"):
     # add prefix to the input for t5
@@ -35,10 +34,9 @@ def preprocess_function(sample, padding="max_length"):
     # tokenize labels
     sample["label_id"] = [str(x) for x in sample["label_id"]]
     labels = tokenizer(text_target=sample["label_id"], max_length=max_target_length, padding=padding, truncation=True)
-    
   
     # If we are padding here, replace all tokenizer.pad_token_id in the labels by -100 when we want to ignore
-    # padding in the loss. 
+    # padding in the loss.
     if padding == "max_length":
         labels["input_ids"] = [
             [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
@@ -59,7 +57,7 @@ def postprocess_text(preds, labels):
 
     return preds, labels
 
-def compute_metrics(eval_preds):
+def compute_metrics(emotion_list, eval_preds):
     
     preds, labels = eval_preds
     #if isinstance(preds, tuple): preds = preds[0]
@@ -119,8 +117,16 @@ def compute_metrics(eval_preds):
     
     return result
 
+def load_file(path):
+    if path.endswith('.json') or path.endswith('.jsonl'):
+        return read_list_from_jsonl_file(path)
+    elif path.endswith('.csv'):
+        return read_list_from_csv_file(path)
+    else:
+        raise ValueError(f"Unsupported file format: {path}")
 
-def train(train_set, val_set, test_set, tokenizer, model, model_name = 'facebook/bart-base', max_source_length = 64, max_target_length = 8, epochs = 40, batch_size = 4):
+
+def train(train_set, val_set, test_set, tokenizer, model, model_name = 'facebook/bart-base', max_source_length = 64, max_target_length = 8, epochs = 40, batch_size = 4, emotion_list = ['anger', 'brain dysfunction (forget)', 'emptiness', 'hopelessness', 'loneliness', 'sadness', 'suicide intent', 'worthlessness']):
     
     # load dataset 
     '''train_set = datasets.load_dataset('json', data_files = 'Dataset/train.json', split="train")
@@ -144,22 +150,43 @@ def train(train_set, val_set, test_set, tokenizer, model, model_name = 'facebook
 
     # The maximum total input sequence length after tokenization. 
     # Sequences longer than this will be truncated, sequences shorter will be padded.
-    tokenized_inputs = concatenate_datasets([train_set, test_set]).map(lambda x: tokenizer(x["text"], truncation=True), batched=True, remove_columns=['id', 'title', 'post', 'upvotes', 'emotions', 'date', 'text', 'label_id'])
-    print(f"Max source length: {max_source_length}")
+    train_set = Dataset.from_list(train_set)
+    test_set = Dataset.from_list(test_set)
+    val_set = Dataset.from_list(val_set)
+
+    if args.dataset_type == 'dataset1':
+        tokenized_inputs = concatenate_datasets([train_set, test_set]).map(
+            lambda x: tokenizer(x["text"], truncation=True),
+            batched=True,
+            remove_columns=['id', 'title', 'post', 'upvotes', 'emotions', 'date', 'text', 'label_id']
+        )
+        tokenized_targets = concatenate_datasets([train_set, test_set]).map(
+            lambda x: tokenizer(str(x["label_id"]), truncation=True), 
+            batched=True, 
+            remove_columns=['id', 'title', 'post', 'upvotes', 'emotions', 'date', 'text', 'label_id'])
+        tokenized_train_dataset = train_set.map(preprocess_function, batched=True, remove_columns=['id', 'title', 'post', 'upvotes', 'emotions', 'date', 'text', 'label_id'])
+        tokenized_val_dataset = val_set.map(preprocess_function, batched=True, remove_columns=['id', 'title', 'post', 'upvotes', 'emotions', 'date', 'text', 'label_id'])
+    else:
+        tokenized_inputs = concatenate_datasets([train_set, test_set]).map(
+            lambda x: tokenizer(x["text"], truncation=True),
+            batched=True
+        )
+        tokenized_targets = concatenate_datasets([train_set, test_set]).map(
+            lambda x: tokenizer(x['text'], truncation=True, padding="max_length", max_length=1000),
+            batched=True
+        )
+        tokenized_train_dataset = train_set.map(preprocess_function, batched=True)
+        tokenized_val_dataset = val_set.map(preprocess_function, batched=True)
 
     # The maximum total sequence length for target text after tokenization. 
     # Sequences longer than this will be truncated, sequences shorter will be padded."
-    tokenized_targets = concatenate_datasets([train_set, test_set]).map(lambda x: tokenizer(str(x["label_id"]), truncation=True), batched=True, remove_columns=['id', 'title', 'post', 'upvotes', 'emotions', 'date', 'text', 'label_id'])
 
     #max_target_length = max([len(str(x)) for x in tokenized_targets["input_ids"]])
 
     print('Tokenized targets: ', tokenized_targets)
     print(f"Max target length: {max_target_length}")
 
-    tokenized_train_dataset = train_set.map(preprocess_function, batched=True, remove_columns=['id', 'title', 'post', 'upvotes', 'emotions', 'date', 'text', 'label_id'])
     print(f"Keys of tokenized dataset: {list(tokenized_train_dataset.features)}")
-
-    tokenized_val_dataset = val_set.map(preprocess_function, batched=True, remove_columns=['id', 'title', 'post', 'upvotes', 'emotions', 'date', 'text', 'label_id'])
     print(f"Keys of tokenized dataset: {list(tokenized_val_dataset.features)}")
     
     # load model from the hub
@@ -225,19 +252,30 @@ def train(train_set, val_set, test_set, tokenizer, model, model_name = 'facebook
         data_collator=data_collator,
         train_dataset=tokenized_train_dataset,
         eval_dataset=tokenized_val_dataset,
-        compute_metrics=compute_metrics,
+        compute_metrics=lambda eval_preds: compute_metrics(emotion_list, eval_preds),
         )
 
     trainer.train()
     #trainer.evaluate()
 
 def test(dataset, model_name, model, tokenizer, input_file = 'Dataset/test.json', \
-                     batch_size = 4, max_len = 128, min_len = 1):
+                     batch_size = 4, max_len = 128, min_len = 1, emotion_list = ['anger', 'brain dysfunction (forget)', 'emptiness', 'hopelessness', 'loneliness', 'sadness', 'suicide intent', 'worthlessness']):
 
     
     if (len(dataset) == 0): # load dataset if not given
-        dataset = read_list_from_jsonl_file(input_file)
+        test_set, train_set, val_set = [], [], []
+        dataset = load_file(input_file)
         
+        if args.dataset_type=='dataset2':
+            dataset = change_format(args, dataset)
+            train_set, test_set = train_test_split(dataset, test_size=0.3, random_state=42, shuffle=True) if not test_set and not val_set else (train_set, test_set)
+            val_set, test_set = train_test_split(test_set, test_size=0.5, random_state=42, shuffle=True) if not val_set else (val_set, test_set)
+            dataset = test_set
+        elif args.dataset_type=='dataset3':
+            dataset = change_format(args, dataset)
+            val_set, test_set = train_test_split(dataset, test_size=0.5, random_state=42, shuffle=True) if not val_set else (train_set, test_set)
+            dataset = test_set
+    
     pred_list = []
     for i in range(0, len(dataset), batch_size):
 
@@ -265,9 +303,8 @@ def test(dataset, model_name, model, tokenizer, input_file = 'Dataset/test.json'
         
         preds = [[x] for x in preds]
         pred_list += preds
-
-    pred_list = [[x for x in pred][0].strip() for pred in pred_list] # use strip() to remove spaces
     
+    pred_list = [[x for x in pred][0].strip() for pred in pred_list] # use strip() to remove spaces
     label_list = [str(item['label_id']) for item in dataset]
     
     digits = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']
@@ -320,13 +357,13 @@ def test(dataset, model_name, model, tokenizer, input_file = 'Dataset/test.json'
         re_mac = recall_score(y_true=temp_label_list, y_pred=temp_pred_list, average='macro')
         pre_mac = precision_score(y_true=temp_label_list, y_pred=temp_pred_list, average='macro')
     
-        result['f1_micro_' + emotion] = f1_mi
-        result['recall_micro_' + emotion] = re_mi
-        result['precision_micro_' + emotion] = pre_mi
+        result['f1_micro_' + str(emotion)] = f1_mi
+        result['recall_micro_' + str(emotion)] = re_mi
+        result['precision_micro_' + str(emotion)] = pre_mi
     
-        result['f1_macro_' + emotion] = f1_mac
-        result['recall_macro_' + emotion] = re_mac
-        result['precision_macro_' + emotion] = pre_mac
+        result['f1_macro_' + str(emotion)] = f1_mac
+        result['recall_macro_' + str(emotion)] = re_mac
+        result['precision_macro_' + str(emotion)] = pre_mac
         
         print(str(round(f1_mac, 2)) + ' & ' + str(round(pre_mac, 2)) + ' & ' + str(round(re_mac, 2)) + ' & ' + str(round(f1_mi, 2)) + ' & ' + str(round(pre_mi, 2)) + ' & ' + str(round(re_mi, 2)))
         print('----------------------------------------')
@@ -334,12 +371,94 @@ def test(dataset, model_name, model, tokenizer, input_file = 'Dataset/test.json'
     print('result: ', result)
     return result
 
-def main(args):
-    if (args.mode == 'train'):
-        train_set = datasets.load_dataset('json', data_files = args.train_path, split="train")
-        test_set = datasets.load_dataset('json', data_files = args.test_path, split="train")
-        val_set = datasets.load_dataset('json', data_files = args.val_path, split="train")
+def convert_to_multilabel_indicator(args, labels):
+    multi_label = ''
+    num_classes = len(args.label_list)
+    if isinstance(labels, int):
+        labels = [str(labels)]    
+        for label in labels:
+            encoding = [0] * num_classes 
+            encoding[int(label)] = 1 
+            multi_label += ''.join(map(str, encoding))
+    elif isinstance(labels, str):
+        labels = [label for label in labels if label.strip().isdigit()]
+        labels = [int(label) for label in labels]
+        for label in labels:
+            encoding = [0] * num_classes 
+            encoding[label] = 1         
+            multi_label += ''.join(map(str, encoding))
+    return multi_label
 
+def change_format(args, dataset):
+    if args.mode=='test':
+        if args.dataset_type=='dataset2':
+            new_format_dataset = []
+            dataset = dataset[1:]
+            for item in dataset:
+                data = {
+                    'text' : item[0],
+                    'label_id': item[1]
+                }
+                new_format_dataset.append(data)
+            dataset=new_format_dataset
+        elif args.dataset_type=='dataset3':
+            new_format_dataset = []
+            dataset = dataset[1:]
+            for item in dataset:
+                data = {
+                    'text' : item[4],
+                    'label_id': item[5]
+                }
+                new_format_dataset.append(data)
+            dataset=new_format_dataset
+    elif args.mode=='train':
+        if args.dataset_type=='dataset2':
+            new_format_dataset = []
+            for item in dataset:
+                data = {
+                    'text' : item['Text'],
+                    'label_id': item['Label']
+                }
+                new_format_dataset.append(data)
+            dataset=new_format_dataset
+        elif args.dataset_type=='dataset3':
+            new_format_dataset = []
+            for item in dataset:
+                data = {
+                    'text' : item['text'],
+                    'label_id': item['label']
+                }
+                new_format_dataset.append(data)
+            dataset=new_format_dataset
+    for entry in dataset:
+            entry['label_id'] = convert_to_multilabel_indicator(args, entry['label_id'])
+    return dataset
+
+def main(args):
+    if isinstance(args.label_list, str):
+            args.label_list = json.loads(args.label_list)
+    if isinstance(args.emotion_list, str):
+            args.emotion_list = json.loads(args.emotion_list)
+    
+    if (args.mode == 'train'):
+        if args.dataset_type=='dataset1':
+            train_set = datasets.load_dataset('json', data_files = args.train_path, split="train")
+            test_set = datasets.load_dataset('json', data_files = args.test_path, split="train")
+            val_set = datasets.load_dataset('json', data_files = args.val_path, split="train")
+        else:
+            train_set = datasets.load_dataset('csv', data_files = args.train_path, split="train")            
+            test_set = datasets.load_dataset('csv', data_files = args.test_path, split="train") if args.test_path else []
+            val_set = datasets.load_dataset('csv', data_files = args.val_path, split="train") if args.val_path else []
+            train_set=change_format(args, train_set)
+            test_set=change_format(args, test_set)
+            val_set=change_format(args, val_set)
+            
+        if args.dataset_type=='dataset2':
+            train_set, test_set = train_test_split(train_set, test_size=0.3, random_state=42, shuffle=True) if not test_set and not val_set else (train_set, test_set)
+            val_set, test_set = train_test_split(test_set, test_size=0.5, random_state=42, shuffle=True) if not val_set else (val_set, test_set)
+        elif args.dataset_type=='dataset3':
+            val_set, test_set = train_test_split(test_set, test_size=0.5, random_state=42, shuffle=True) if not val_set else (val_set, test_set)
+            
         print(f"Train dataset size: {len(train_set)}")
         print(f"Test dataset size: {len(test_set)}")
         print(f"Val dataset size: {len(val_set)}")
@@ -347,13 +466,18 @@ def main(args):
         model = AutoModelForSeq2SeqLM.from_pretrained(args.model_name)
         model.to(device)
         
-        train(train_set, val_set, test_set, tokenizer, model, model_name = args.model_name, max_source_length = args.max_source_length, max_target_length = args.max_target_length, epochs = args.epochs, batch_size = args.batch_size)
+        train(train_set, val_set, test_set, tokenizer, model, model_name = args.model_name, max_source_length = args.max_source_length, max_target_length = args.max_target_length, epochs = args.epochs, batch_size = args.batch_size, emotion_list=args.emotion_list)
     
     elif (args.mode == 'test'):
+        if isinstance(args.label_list, str):
+            args.label_list = json.loads(args.label_list)
+        if isinstance(args.emotion_list, str):
+            args.emotion_list = json.loads(args.emotion_list)
+            
         model = AutoModelForSeq2SeqLM.from_pretrained(args.model_path)
         model.to(device)
         model.eval()
-        test([], args.model_name, model, tokenizer, input_file = args.test_path, batch_size = args.test_batch_size, max_len = args.max_source_length, min_len = args.min_target_length)
+        test([], args.model_name, model, tokenizer, input_file = args.test_path, batch_size = args.test_batch_size, max_len = args.max_source_length, min_len = args.min_target_length, emotion_list=args.emotion_list)
 
 #...............................................................................            
 if __name__ == "__main__":
@@ -362,15 +486,17 @@ if __name__ == "__main__":
     parser.add_argument('--mode', type=str, default='train') # or test
     parser.add_argument('--model_name', type=str, default='facebook/bart-base') # or test
     parser.add_argument('--train_path', type=str, default='Dataset/train.json') 
-    parser.add_argument('--test_path', type=str, default='Dataset/test.json')
-    parser.add_argument('--val_path', type=str, default='Dataset/val.json')
+    parser.add_argument('--test_path', type=str, default=None)
+    parser.add_argument('--val_path', type=str, default=None)
     parser.add_argument('--epochs', type=int, default=40)
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--test_batch_size', type=int, default=16)
     parser.add_argument('--max_source_length', type=int, default=256)
     parser.add_argument('--max_target_length', type=int, default=8)
     parser.add_argument('--min_target_length', type=int, default=1)
-    
+    parser.add_argument('--emotion_list', default = ['anger', 'brain dysfunction (forget)', 'emptiness', 'hopelessness', 'loneliness', 'sadness', 'suicide intent', 'worthlessness'])
+    parser.add_argument('--label_list', default=None)
+    parser.add_argument('--dataset_type', type=str, default='dataset1')
     parser.add_argument('--model_path', type=str, default='bart-base/checkpoint-1590')
     parser.add_argument('--test_file', type=str, default='Dataset/test.json')
   

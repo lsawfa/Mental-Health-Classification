@@ -11,13 +11,12 @@ from transformers import *
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
 import pandas as pd
 from sklearn.metrics import f1_score, precision_score, recall_score
-
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MultiLabelBinarizer
 from preprocessing import *
 from file_io import *
 import datasets
 import argparse
-
-emotion_list = ['anger', 'brain dysfunction (forget)', 'emptiness', 'hopelessness', 'loneliness', 'sadness', 'suicide intent', 'worthlessness']
 
 def convert_labels(labels):
     
@@ -25,31 +24,74 @@ def convert_labels(labels):
     for idx, label in enumerate(labels):
        
         temp = []
-        num = len(emotion_list) - len(label)
+        num = len(args.emotion_list) - len(label)
         if (num == 0): 
             temp = [int(x) for x in label]
         else:
             temp = ''.join(['0']*num) + str(label)   
-            temp = [int(x) for x in temp]
+            temp = [int(x) if x.isdigit() else -1 for x in temp]
             
         labels2.append(temp)
         
     return labels2
+
+def change_format(dataset):
+    if args.dataset_type=='dataset2':
+        new_format_dataset = []
+        for item in dataset:
+            data = {
+                'text' : item['Text'],
+                'label_id': item['Label']
+            }
+            new_format_dataset.append(data)
+        dataset=new_format_dataset
+    elif args.dataset_type=='dataset3':
+        new_format_dataset = []
+        for item in dataset:
+            data = {
+                'text' : item['text'],
+                'label_id': item['label']
+            }
+            new_format_dataset.append(data)
+        dataset=new_format_dataset
+    for entry in dataset:
+            entry['label_id'] = convert_to_multilabel_indicator(entry['label_id'])
+    return dataset
+
+def convert_to_multilabel_indicator(labels):
+    multi_label = ''
+    num_classes = len(args.label_list)
+    if isinstance(labels, int):
+        labels = [str(labels)]    
+        for label in labels:
+            encoding = [0] * num_classes 
+            encoding[int(label)] = 1 
+            multi_label += ''.join(map(str, encoding))
+    elif isinstance(labels, str):
+        labels = [label for label in labels if label.strip().isdigit()]
+        labels = [int(label) for label in labels]
+        for label in labels:
+            encoding = [0] * num_classes 
+            encoding[label] = 1         
+            multi_label += ''.join(map(str, encoding))
+    return multi_label
     
 def get_qc_examples(input_file):
-    
     examples = []
-    dataset = datasets.load_dataset('json', data_files = input_file, split="train")
+    if args.dataset_type=='dataset1':
+        dataset = datasets.load_dataset('json', data_files = input_file, split="train")
+    elif args.dataset_type=='dataset2' or args.dataset_type=='dataset3':
+        dataset = datasets.load_dataset('csv', data_files = input_file, split="train")
+        dataset = change_format(dataset)
     for item in dataset:
         text = '[CLS] ' + item['text'] + ' [SEP]'
         label = ''
         try:
             label = str(item['label_id'])
         except:
-            label = 'unlabelled'     
+            label = 'unlabelled'  
         examples.append((text, label))
-        
-    
+
     return examples
 
 def generate_data_loader(tokenizer, max_seq_length, batch_size, input_examples, label_masks, label_map, do_shuffle = False, balance_label_examples = False):
@@ -266,10 +308,10 @@ def train_model(model_name = '',
     #  Retrieve dataset
     #--------------------------------
 
-    labeled_file = "Dataset/train.json" 
-    unlabeled_file = "Dataset/test.json" 
-    val_filename = "Dataset/val.json" 
-    test_filename = "Dataset/test.json" 
+    labeled_file = args.train_file 
+    unlabeled_file = args.test_file
+    val_filename = args.val_file
+    test_filename = args.test_file 
                       
     transformer = AutoModel.from_pretrained(model_name)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -278,9 +320,17 @@ def train_model(model_name = '',
     dataset = get_qc_examples(labeled_file)
     #random.shuffle(dataset)
     
-    labeled_examples = dataset
-    val_examples = get_qc_examples(val_filename)
-    test_examples = get_qc_examples(test_filename)
+    if args.dataset_type=='dataset1':
+        labeled_examples = dataset
+        val_examples = get_qc_examples(val_filename)
+        test_examples = get_qc_examples(test_filename)
+    elif args.dataset_type=='dataset2':
+        labeled_examples, test_examples = train_test_split(dataset, test_size=0.3, random_state=42, shuffle=True) 
+        val_examples, test_examples = train_test_split(test_examples, test_size=0.5, random_state=42, shuffle=True) 
+    elif args.dataset_type=='dataset3':
+        labeled_examples = dataset
+        test_examples = get_qc_examples(test_filename)
+        val_examples, test_examples = train_test_split(test_examples, test_size=0.5, random_state=42, shuffle=True) 
 
     #unlabeled_examples = get_qc_examples(unlabeled_file)
     unlabeled_examples = ()
@@ -297,7 +347,7 @@ def train_model(model_name = '',
     label_list = list(set(label_list))
     print('label_list: ', label_list)'''
     
-    label_list = read_list_from_json_file('Dataset/label_names.json')
+    label_list = read_list_from_json_file(args.label_names)
     print('label_list: ', label_list)
     
     label_map = {}
@@ -960,7 +1010,7 @@ def predict_dataset(saved_model_name = 'gan_bert_best_model.pt', test_filename =
     #--------------------------------
 
    
-    label_list = read_list_from_json_file('Dataset/label_names.json')
+    label_list = read_list_from_json_file(args.label_names)
     print('label_list: ', label_list)
    
     label_map = {}
@@ -1023,7 +1073,16 @@ def predict_dataset(saved_model_name = 'gan_bert_best_model.pt', test_filename =
         transformer.cuda()
         if multi_gpu: transformer = torch.nn.DataParallel(transformer)
 
-    test_examples = get_qc_examples(test_filename)
+    if args.dataset_type=='dataset1':    
+        test_examples = get_qc_examples(test_filename)
+    elif args.dataset_type=='dataset2':
+        dataset = get_qc_examples(test_filename)
+        labeled_examples, test_examples = train_test_split(dataset, test_size=0.3, random_state=42, shuffle=True) 
+        val_examples, test_examples = train_test_split(test_examples, test_size=0.5, random_state=42, shuffle=True) 
+    elif args.dataset_type=='dataset3':
+        dataset = get_qc_examples(test_filename)
+        val_examples, test_examples = train_test_split(dataset, test_size=0.5, random_state=42, shuffle=True) 
+    
     test_label_masks = np.ones(len(test_examples), dtype=bool)
     
     
@@ -1081,21 +1140,25 @@ def predict_dataset(saved_model_name = 'gan_bert_best_model.pt', test_filename =
     
     # convert back to labels
     label_map2 = dict((v,k) for k,v in label_map.items())
-    all_preds = [label_map2[x] for x in all_preds]
+    all_preds = [label_map2[x] if x in label_map2 else 'unknown' for x in all_preds]
     all_preds = convert_labels(all_preds)
         
     all_labels_ids = [label_map2[x] for x in all_labels_ids]
     all_labels_ids = convert_labels(all_labels_ids)
 
-    # evaluate metrics
-    f1_mi = f1_score(y_true=all_labels_ids, y_pred=all_preds, average='micro')
-    re_mi = recall_score(y_true=all_labels_ids, y_pred=all_preds, average='micro')
-    pre_mi = precision_score(y_true=all_labels_ids, y_pred=all_preds, average='micro')
-    
-    f1_mac = f1_score(y_true=all_labels_ids, y_pred=all_preds, average='macro')
-    re_mac = recall_score(y_true=all_labels_ids, y_pred=all_preds, average='macro')
-    pre_mac = precision_score(y_true=all_labels_ids, y_pred=all_preds, average='macro')
-    
+    mlb = MultiLabelBinarizer()
+    all_labels_ids_bin = mlb.fit_transform(all_labels_ids)  # Konversi y_true
+    all_preds_bin = mlb.transform(all_preds)               # Konversi y_pred
+
+    # Hitung metrik evaluasi
+    f1_mi = f1_score(y_true=all_labels_ids_bin, y_pred=all_preds_bin, average='micro')
+    re_mi = recall_score(y_true=all_labels_ids_bin, y_pred=all_preds_bin, average='micro')
+    pre_mi = precision_score(y_true=all_labels_ids_bin, y_pred=all_preds_bin, average='micro')
+
+    f1_mac = f1_score(y_true=all_labels_ids_bin, y_pred=all_preds_bin, average='macro')
+    re_mac = recall_score(y_true=all_labels_ids_bin, y_pred=all_preds_bin, average='macro')
+    pre_mac = precision_score(y_true=all_labels_ids_bin, y_pred=all_preds_bin, average='macro')
+
     test_result = {}
     test_result['f1_micro'] = f1_mi
     test_result['recall_micro'] = re_mi
@@ -1126,6 +1189,12 @@ def predict_dataset(saved_model_name = 'gan_bert_best_model.pt', test_filename =
     
 
 def main(args):
+    if isinstance(args.emotion_list, str):
+            args.emotion_list = json.loads(args.emotion_list)
+    if isinstance(args.label_list, str):
+            args.label_list = json.loads(args.label_list)
+
+
     if (args.mode == 'train'):
         train_model(model_name = args.model_name, 
             learning_rate_discriminator = float(args.lr_discriminator), learning_rate_generator = float(args.lr_generator), 
@@ -1151,7 +1220,13 @@ if __name__ == "__main__":
     parser.add_argument('--test_file', type=str, default='Dataset/test.json')
     parser.add_argument('--out_test_file', type=str, default='Dataset/test_pred.json')
     parser.add_argument('--out_test_label_file', type=str, default='Dataset/test_label.json')
-  
+    parser.add_argument('--label_names', type=str, default='Dataset/label_names.json')
+    parser.add_argument('--train_file', type=str, default=None)
+    parser.add_argument('--val_file', type=str, default=None)
+    parser.add_argument('--emotion_list', type=str, default=None)
+    parser.add_argument('--dataset_type', type=str, default=None)
+    parser.add_argument('--label_list', type=str, default=None)
+    
     args = parser.parse_args()     
     main(args)
 
